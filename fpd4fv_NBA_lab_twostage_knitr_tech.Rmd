@@ -1,0 +1,424 @@
+---
+title: "NBA Player Acquisition Recommendation Lab"
+author: "Francis Parker Driscoll"
+date: "4/12/2022"
+output: 
+  html_document:
+    toc: TRUE
+    theme: cosmo
+    toc_float: TRUE
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE, cache=TRUE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+
+```
+
+
+
+```{r libraries, echo = FALSE, warning = FALSE, message = FALSE}
+### Libraries
+
+library(readxl) #used for reading in nba_salaries_21.xlsx
+
+#install.packages("corrplot")
+library(corrplot) #used for producing correlogram
+
+#install.packages("plotly")
+library(plotly) #used for producing interactive 3d visualization
+
+library(ggplot2) #used for plotting explained variances over several different number of clusters
+
+#Used for developing decision tree regression
+library(tidyverse)
+library(caret)
+library(ROCR)
+library(MLmetrics)
+library(mltools)
+library(rpart.plot)
+
+library(knitr) #used for knitting file to HTML
+
+```
+
+## Lab Prompt
+"You are a scout for the worst team in the NBA, probably the Wizards. Your 
+general manager just heard about Data Science and thinks it can solve all the
+teams problems! She wants you to figure out a way to find players that are 
+high performing but maybe not highly paid that you can steal to get the team 
+to the playoffs!"
+
+## Summary of Approach to Recommending Players for Acquisition
+This site will showcase my data-driven approach for recommending players for acquisition an NBA team. I am using a two-stage approach that will combine an unsupervised machine learning clustering approach and a supervised machine learning regression model to make educated predictions about which high performing players are underpaid and thus ideal targets for acquisition.
+
+1. Conduct unsupervised machine learning k-means clustering. This will take all relevant features into account and produce another feature, cluster, which will eventually aid in producing a more accurate supervised machine learning regression model. In order to decide the ideal number of clusters to use for this dataset, I will use a function to evaluate explained variance over a range of number of clusters in order to reveal which number of clusters maximizes explained variance while minimizing complexity
+
+2. With clustering complete, I will turn to produce a 3d visualization that will show players that are performing highly amongst the stats most closely correlated with salary in order to reveal the high-performing players that are underpaid relative to their peers. In order to identify the features that are the most correlated with salary, I will develop a correlogram between all of the relevant features in the dataset.
+
+3. I will then develop a supervised machine learning regression model to make predictions on what a player should be earning considering their performance stats. I will evaluate different regression models such as rpart2 decision tree regression and a generalized linear model to see which model produces the most accurate predictions. Equipped with salary predictions, I will investigate the players who had high performance metrics as seen from the 3d visualization and see if the models predicts that these players are underpaid.
+
+
+## Data
+I will be using a dataset of 401 NBA players throughout the 2020-2021 season that includes the following information and stats: 
+
+* Player
+* Position
+* Age
+* Tm (Team)
+* G (Number of Games Played in)
+* GS (Number of Games Player Has Started in)
+* MP (Minutes Played)
+* FG (Field Goals)
+* FGA (Field Goals Attempted)
+* FG. (Field Goal Percentage)
+* X3P (Three point baskets)
+* X3PA (Three point shot attempts)
+* X3P. (Three point shot percentage)
+* X2P (Two point baskets)
+* X2PA (Two point shot attempts)
+* X2P. (Two point shot percentage)
+* eFG. (effective field goal percentage)
+* FT (Free Throws)
+* FTA (Free Throws Attempted)
+* FT. (Free Throw Percentage)
+* ORB (Offensive Rebounds)
+* DRB (Defensive Rebounds)
+* TRB (Total Rebounds)
+* AST (Assists)
+* STL (Steals)
+* BLK (Blocks)
+* TOV (Turnovers)
+* PF (Personal Fouls)
+* PTS (Points)
+* 2020-2021 (Player's Salary in 2020-2021 Season)
+
+```{r loading_data, echo = FALSE, warning = FALSE, message = FALSE}
+### Loading Data
+
+#Import data
+nba_data <- read.csv("/Users/fpriscoll/Desktop/DS_3001/DS-3001/10_kMeans_Clustering/nba2020-21-1.csv")
+#str(nba_data)
+
+
+nba_salaries_21 <- read_excel("/Users/fpriscoll/Desktop/DS_3001/DS-3001/10_kMeans_Clustering/nba_salaries_21.xlsx")
+nba_salary <- data.frame(nba_salaries_21)
+#str(nba_salary)
+
+
+nba_salary <- data.frame(nba_salaries_21)
+#view(nba_salary)
+
+#merge data using inner join
+nba_data_complete <- inner_join(nba_data , nba_salaries_21)
+#view(nba_data_complete)
+
+
+```
+
+
+```{r cleaning_data, echo = FALSE, warning = FALSE, message = FALSE}
+### cleaning data
+
+#removing rows with NAs
+nba_data_complete_narm <- nba_data_complete[complete.cases(nba_data_complete),]
+#removing rows with NAs produces a dataframe that has 401 rows
+
+#Turning position into a factor
+nba_data_complete_narm$Pos <- as.factor(nba_data_complete_narm$Pos)
+
+```
+
+
+```{r preparing_data_for_clustering, echo = FALSE, warning = FALSE, message = FALSE}
+### Preparing data for clustering
+
+#colnames 
+#("Player","Pos","Age","Tm","G","GS","MP","FG","FGA","FG.","X3P","X3PA","X3P.","X2P", "X2PA","X2P.","eFG.","FT","FTA","FT.","ORB","DRB","TRB","AST","STL","BLK","TOV","PF","PTS","2020-21")
+
+#Omitting "Player", "position", FG","FGA","X3P","X3PA","X2P", "X2PA","FT","FTA",
+clust_data_nba = nba_data_complete_narm[, c("Age","G","GS","MP","FG.","X3P.","X2P.","eFG.","FT.","ORB","DRB","TRB","AST","STL","BLK","TOV","PF","PTS","2020-21")]
+
+
+```
+
+## Data Preparation and Variable Selection
+For this dataset, I removed players from consideration who had incomplete stat reports. Removing players with NA values for some of their information took 36 players out of consideration. Considering that 401 out of the original 437 players were still included to inform the models and visualizations and be considered as candidates for acquisition, removing players with incomplete sets of stats was not a decision that rendered this dataset useless.
+
+As I selected the variables to be considered for consideration in the models, I removed variables that would not provide value to the model or could not be processed such as the name of the players (Player) and the name of the teams (Tm). Columns that referenced shooting data columns - made shots and attempted shots - were removed as the shooting percentage stats captured that data. As I produced the initial clustering model, position had to be removed from consideration as the kmeans clustering approach that I employed cannot process categorical data. 
+
+## Unsupervised Machine Learning: K-means Clustering
+With the data cleaned and prepared, the first thing that I did was use the data in a k-means clustering model. Based on the features (variables) in consideration, K-means clustering assigns each player to a cluster in an effort to sort (basically categorize) similar data together. This provides value when I go to make a supervised machine learning approach as the information about what cluster each player is assigned to can be used as a new feature that could be associated with their salary and help the model in making more accurate predictions.
+
+
+```{r explained_variance_function, echo = FALSE, warning = FALSE, message = FALSE}
+### function for automating returning explained_variance from k-means clustering
+
+# The function explained_variance wraps code for calculating the variance explained by clustering.
+explained_variance = function(data_in, k){
+  
+  # Running the k-means algorithm.
+  set.seed(1)
+  kmeans_obj = kmeans(data_in, centers = k, algorithm = "Lloyd", iter.max = 30)
+  
+  # Variance accounted for by clusters:
+  # var_exp = intercluster variance / total variance
+  var_exp = kmeans_obj$betweenss / kmeans_obj$totss
+  var_exp  
+}
+
+```
+
+Using this elbow plot, I visualized the explained variance metric that would be outputted if you run a k-means clustering approach on this data with different k values (number of clusters)
+```{r elbow_plot, echo = FALSE, warning = FALSE, message = FALSE}
+### Producing elbow-plot of explained variances across k values (number of clusters) 1:10
+
+explained_var_nba = sapply(1:10, explained_variance, data_in = clust_data_nba)
+
+#View(explained_var_nba)
+#str(explained_var_nba)
+
+
+# Data for ggplot2 so we can plot explained variance over several k values (number of clusters)
+elbow_data_nba = data.frame(k = 1:10, explained_var_nba)
+#View(elbow_data_nba)
+
+# Plotting data onto elbow plot
+ggplot(elbow_data_nba, 
+       aes(x = k,  
+           y = explained_var_nba)) + 
+  geom_point(size = 4) +           #<- sets the size of the data points
+  geom_line(size = 1) +            #<- sets the thickness of the line
+  xlab('k') + 
+  ylab('Inter-cluster Variance / Total Variance')
+
+#From this elbow plot, the point of inflection exists at k=3 so the ideal number of clusters is 3
+```
+The point of inflection on this elbow plot exists at k = 3 so the ideal number of clusters for this dataset is 3. 
+
+```{r clustering_k_3, echo = FALSE, warning = FALSE, message = FALSE}
+### Producing cluster predictions with 3 clusters
+
+set.seed(2049)
+kmeans_obj_nba_3clust = kmeans(clust_data_nba, centers = 3, algorithm = "Lloyd")
+
+#adding a cluster column to the nba cluster dataframe
+clust_data_nba$cluster <- kmeans_obj_nba_3clust$cluster
+#str(clust_data_nba)
+
+```
+
+## Using Correlogram to Identify Best Predictors of a Player's Salary
+At this point, I also created a correlogram which shows which of a player's stats are most correlated with their salary.
+
+```{r correlogram, fig.width = 9 , fig.height=9, fig.align = "center", echo=FALSE}
+### Running correlation plot to find the features most correlated with salary
+
+corr_matrix_nba <- cor(clust_data_nba)
+corrplot(corr_matrix_nba, method = "number")
+```
+
+This correlogram suggested that Assists (AST), Points (PTS), and Turnovers (TOV) were the three variables most correlated with predicting a player's salary. As a result, these were the three variables that I selected to visualize a players and their salaries in a 3D visualization. 
+
+## 3D Visualization of Assists, Points, Turnovers and Salary
+As these three variables are the best individual predictors of a players salary, I graphed them expecting to find the players with the best stats across these variables as the ones who would be earning the highest salary. However, I also expected to find players who are high-performing across these three crucial stats that were compensated significantly less than players of similar caliber, and these would be targets for acquisition that should be given further consideration. To see the discrepancies between different players' salaries, I plotted a player's salary as the size of their plotted point. The idea being that a player with a small circle amongst players with much larger circles would be a player that is paid significantly less than other players of a comparable caliber.
+
+
+```{r 3d_visualization, echo = FALSE, message = FALSE, warning=FALSE}
+### Producing 3d visualization with x = AST, y = PTS, z = TOV, and point size = `2020-2021` (salary)
+
+#changing cluster labels to factors so ggplot2 understands them as categories rather than continuous variables
+clust_data_nba$cluster <- as_factor(clust_data_nba$cluster)
+#str(clust_data_nba)
+
+
+#joining cluster data onto dataframe with Player name and TM
+nba_data_complete_narm$cluster <- as_factor(clust_data_nba$cluster)
+#str(nba_data_complete_narm)
+
+
+#this a regular expression. This pulls out any characters that aren't alphanumeric. Anything that isn't strictly alphanumeric won't be projected in 3d since the 3d plot includes last name and can only plot last names that are strictly alphanumeric
+nba_data_complete_narm$Player <- gsub("[^[:alnum:]]", "", nba_data_complete_narm$Player)
+
+#Producing 3d plot. x axis represents assists, y axis represents points, z represents turnovers
+#size of plotted point represents salary of each player
+nba_3d_fig <- plot_ly(nba_data_complete_narm, 
+               type = "scatter3d",
+               mode="markers",
+               x = ~AST, 
+               y = ~PTS, 
+               z = ~TOV,
+               text = ~paste('Player:', Player,
+                             "Team:",Tm),
+               marker=list(
+                 size = (nba_data_complete_narm$`2020-21`/1000000)
+                 )
+                 )
+nba_3d_fig
+dev.off()
+
+```
+
+
+This visualization provoked interest in several players, specifically Trae Young, Donovan Mitchell, DeAaron Fox, Bam Adebayo, Shai Gilgeous Alexander, and LaMelo Ball.
+
+## Developing Supervised Machine Learning Regression Model to Predict Salary
+After examining this visualization and equipped with cluster data from my initial k-means clustering, I then implemented a supervised machine learning regression approach to further examine the relationship between performance and compensation in order to predict who would be the most cost-efficient players to acquire. This model would consider all of their stats and the cluster that they were assigned to in the earlier k-means clustering model.
+
+
+```{r preparing_train_tune_test, echo = FALSE, warning = FALSE}
+###Splitting the data into train, tune, and test sets
+
+#str(nba_data_complete_narm)
+
+set.seed(2049)
+nba_index <- caret::createDataPartition(nba_data_complete_narm$`2020-21`,
+                                           times=1,
+                                           p = 0.70,
+                                           groups=1,
+                                           list=FALSE)
+#Creating training set
+nba_train <- nba_data_complete_narm[nba_index, ]
+nba_tune_and_test <- nba_data_complete_narm[-nba_index, ]
+#str(nba_train)
+
+#Creating tuning and testing sets
+nba_tune_and_test_index <- createDataPartition(nba_tune_and_test$`2020-21`,
+                                               times = 1,
+                                               p = 0.50,
+                                               list = FALSE)
+
+nba_tune <- nba_tune_and_test[nba_tune_and_test_index, ]
+nba_test <- nba_tune_and_test[-nba_tune_and_test_index, ]
+
+#checking dimensions to ensure each set is the correct size
+#dim(nba_train)
+#dim(nba_tune)
+#dim(nba_test)
+
+```
+
+
+```{r setting_up_features_and_target, echo = FALSE, warning = FALSE}
+###Setting up features dataframe and target dataframe
+
+nba_target <- data.frame(`2020-21`=nba_train$`2020-21`)
+#str(nba_target)
+
+nba_features <- nba_train[, -c(30, 4, 1)] #dropping column 30 (2020-2021 salary) because it is the target variable. Dropping column 4 (team) and 1 (Player) as they are non-numeric features that cannot be processed in this decision tree regression model.
+#str(nba_features)
+
+```
+
+Evaluating the performance metrics RMSE, Rsquared, and MAE while changing the hyperparameter maxdepth in order to identify the maxdepth level that maximizes performance while minimizing complexity
+```{r building_rpart2_regression_model, echo = FALSE, warning = FALSE, message = FALSE}
+###Building rpart2 regression model
+
+#Establishing cross-validation process
+fitControl <- trainControl(method = "repeatedcv",
+                           number = 10,
+                           repeats = 5)
+
+
+#Setting hyperparamater of max depth to be considered
+tree.grid <- expand.grid(maxdepth=c(1:20))
+
+set.seed(2049)
+#rpart2 model using expanded tree grid to evaluate differing levels of hyper-parameter maxdepth. Using RMSE, the model recommends maxdepth = 2 in order to maximize performance while minimizing complexity of the model.
+nba_dt_reg <- train(x=nba_features,
+                        y=nba_target$X2020.21,
+                        method="rpart2",
+                        trControl = fitControl,
+                        tuneGrid = tree.grid,
+                        metric = "RMSE")
+nba_dt_reg
+
+# maxdepth = 2  RMSE = 3147395  Rsquared = 0.9054066  MAE = 2422250
+```
+
+Building a generalized linear model to see if it provides better performance than the rpart2 model
+```{r generalized_linear_model, echo = FALSE, warning = FALSE, message = FALSE}
+
+#generalized linear model
+#Running this generalized linear model to see if this different method would produce a more accurate regression model than the rpart2 model used above. Judging from RMSE, Rsquared, and MAE values, I will decide which is a more valuable method to use in working with this data.
+
+set.seed(2049)
+nba_glm_reg <- train(x=nba_features,
+                        y=nba_target$X2020.21,
+                        method="glm",
+                        trControl = fitControl,
+                        metric = "RMSE")
+nba_glm_reg
+
+#RMSE = 2658754  Rsquared = 0.9287082  MAE = 1995981  
+#Comparing these performance metrics to the best rpart2 model developed above, the generalized linear model performed better across all three metrics. As a result, it is clear that the generalized linear model is a more accurate approach to explaining this data.
+```
+The Generalized Linear Model (glm) provides lower RMSE and MAE values and a higher Rsquared value which means that the glm model is a more accurate predictor of salary than the rpart2 model.
+
+Evaluating variable importance of the generalized linear model
+```{r evaluating_glm_varImp, echo = FALSE, message = FALSE, warning = FALSE}
+### Evaluating variable importance of generalized linear model
+
+#nba_glm_reg
+varImp(nba_glm_reg)
+
+#Variable importance states that clusters are important variables used in the process of predicting salary which suggests that the initial k-means clustering efforts are aiding this supervised ML approach in making predictions 
+```
+
+## Evaluating Supervised Machine Learning Regression Model Performance and Salary Predictions
+Performance Metrics From Generalized Linear Model
+```{r predicting_with_glm_model, echo = FALSE, warning = FALSE}
+### Making salary predictions with glm model
+
+pred_salary <- predict(nba_glm_reg, nba_data_complete_narm)
+#view(pred_salary)
+
+nba_data_complete_narm_pred <- nba_data_complete_narm
+nba_data_complete_narm_pred$pred_2020_2021 <- pred_salary
+#view(nba_data_complete_narm_pred)
+
+nba_data_complete_narm_pred$pred_vs_obs_residual <- (nba_data_complete_narm_pred$pred_2020_2021 - nba_data_complete_narm_pred$`2020-21`)
+#view(nba_data_complete_narm_pred)
+
+postResample(pred = nba_data_complete_narm_pred$pred_2020_2021, obs = nba_data_complete_narm_pred$`2020-21`)
+#RMSE = 2535178 Rsquared = .93378 MAE = 1881484
+
+```
+
+
+I developed a few machine learning regression models, and I ultimately chose to proceed with a generalized linear regression model. This model produced the following metrics:
+
+* RMSE = 2535178 The RMSE value of 2535178 is the root of the average squared error (difference between the actual salary of a player and the salary that our model predicted). This means that on average, the difference between the actual salary of a player and the salary that our model predicted is approximately $2,535,178.
+* Rsquared = 0.933 This Rsquared value means that 93.3% of the variance in salary can be explained by the independent variables considered. As a perfect Rsquared value is 1.00, this means that the model is performing well in predicting salaries.
+* MAE = 1881484 MAE (mean absolute error) also communicates the average error which means that according to MAE, this model is inaccurate by $1,881,484 on average. Although they both communicate average error of the model, RMSE and MAE differ because MAE is calculated with equal consideration of each error because its based on a linear equation whereas due to the squaring of error in RMSE more emphasis is placed on larger errors.
+
+With these metrics showing that the model is performing well, I then used the model to make predictions on what a player's salary should be based on their stats. By subtracting a player's actual salary from their predicted salary, I developed a column (pred_vs_obs_residual) that could then be filtered on to identify the players who are the most underpaid according to the model.
+
+
+## Final Analysis
+From the 3D visualization, I became interested in Trae Young, Donovan Mitchell, DeAaron Fox, Bam Adebayo, Shai Gilgeous Alexander, and LaMelo Ball as they had high performance markers and appeared to be significantly underpaid relative to their peers. With interests in these players established, I then looked at the salary predictions that my supervised ML regression model made to see which ones would be the most cost-effective to acquire.
+
+* Trae Young                 Predicted - Actual Salary = $4,151,926
+* Donovan Mitchell           Predicted - Actual Salary = $2,897,025
+* DeAaron Fox                Predicted - Actual Salary = $1,135,911
+* Bam Adebayo                Predicted - Actual Salary = $2,083,290
+* Shai Gilgeous Alexander    Predicted - Actual Salary = $3,169,741
+* LaMelo Ball                Predicted - Actual Salary = -$193,005
+
+## Players to target for acquisition: Trae Young, Donovan Alexander, and Shai Gilgeous Alexander{.tabset}
+
+### Trae Young
+Our generalized linear model predicted that Trae Young would earn $10723726 but during the 2020-2021 season he was only paid $6,571,800. Our metrics of error for our generalized model recognizes that the average error of our predictions is approximately $2.5 million or $1.8 million (depending on whether you use RMSE or MAE). Even if you consider the possibility that the model over-predicted Trae Young's salary by the average error according to RMSE, Trae Young would still be earning more than this value. Amongst the players in consideration, I am the most confident that Trae Young is being underpaid, so signing him is a great opportunity to gain a high-caliber player for less money.
+
+![Trae Young plotted in the 3d visualization of Assists, Points, Turnovers, and Salary](/Users/fpriscoll/Desktop/DS_3001/DS-3001/10_kMeans_Clustering/trae_young_3d_plot.png)
+
+### Donovan Mitchell
+Looking at the 3d model, Donovan Mitchell is another player that we would expect to be underpaid, and our generalized linear model confirms this. Our generalized linear model predicted that Donovan Mitchell would earn $8,092,526 but during the 2020-2021 season he was only paid $5,195,501.
+
+![Donovan Mitchell plotted in the 3d visualization of Assists, Points, Turnovers, and Salary](/Users/fpriscoll/Desktop/DS_3001/DS-3001/10_kMeans_Clustering/donovan_mitchell_3d_plot.png)
+
+### Shai Gilgeous Alexander
+Looking at the 3d model, Shai Gilgeous Alexander is another player that we would expect to be underpaid, and our generalized linear model confirms this. Our generalized linear model predicted that Donovan Mitchell would earn $7,311,061 but during the 2020-2021 season he was only paid $4,141,320.
+
+![Shai Gilgeous Alexander plotted in the 3d visualization of Assists, Points, Turnovers, and Salary](/Users/fpriscoll/Desktop/DS_3001/DS-3001/10_kMeans_Clustering/shai_gilgeous_alexander_3d_plot.png)
